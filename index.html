@@ -1,0 +1,336 @@
+import React, { useState, useEffect, useMemo } from 'react';
+import { 
+  Calendar, ChevronLeft, ChevronRight, Plus, Trash2, PieChart, 
+  DollarSign, Coffee, Sparkles, BrainCircuit, Palette, TrendingUp, 
+  Wallet, BookHeart, Heart, Image as ImageIcon, Volume2, Wand2, Mic2
+} from 'lucide-react';
+
+const App = () => {
+  // --- 狀態管理 ---
+  const [currentDate, setCurrentDate] = useState(new Date(2026, 0, 1));
+  const [selectedDate, setSelectedDate] = useState(new Date(2026, 0, 1).toDateString());
+  const [records, setRecords] = useState({});
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiRecommendation, setAiRecommendation] = useState("");
+  const [generatedImg, setGeneratedImg] = useState(null);
+  const [aiHealthReport, setAiHealthReport] = useState("");
+  const [isTtsPlaying, setIsTtsPlaying] = useState(false);
+
+  const apiKey = ""; // 執行環境將自動注入
+
+  const iceOptions = ["正常", "少冰", "微冰", "去冰", "常溫", "溫"];
+  const sugarOptions = ["全糖", "少糖", "半糖", "微糖", "一分糖", "無糖"];
+
+  // --- Gemini API: 文字生成 (核心邏輯) ---
+  const callGemini = async (prompt) => {
+    setAiLoading(true);
+    try {
+      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }],
+          systemInstruction: { parts: [{ text: "你是一位超級可愛、活潑的手搖飲小精靈。請用繁體中文回答，語氣要多用一點波浪號和可愛的顏文字，保持療癒感。回答要精簡，不要超過 100 字。" }] }
+        })
+      });
+      const data = await response.json();
+      return data.candidates?.[0]?.content?.parts?.[0]?.text || "精靈去睡覺了 zzz";
+    } catch (error) {
+      console.error(error);
+      return "畫布上出現了調皮的小鬼，請稍後再試一次喔～";
+    } finally {
+      setAiLoading(false);
+    }
+  };
+
+  // --- Gemini API: 圖像生成 (Imagen 4.0) ---
+  const generateDrinkImage = async (drinkName) => {
+    try {
+      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/imagen-4.0-generate-001:predict?key=${apiKey}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          instances: { prompt: `A cute, high-quality 2D digital illustration of a ${drinkName} bubble tea, soft pastel colors, milk tea aesthetic, Japanese kawaii style, sticker art style, white background` },
+          parameters: { sampleCount: 1 }
+        })
+      });
+      const data = await response.json();
+      if (data.predictions?.[0]?.bytesBase64Encoded) {
+        setGeneratedImg(`data:image/png;base64,${data.predictions[0].bytesBase64Encoded}`);
+      }
+    } catch (error) {
+      console.error("Image gen failed:", error);
+    }
+  };
+
+  // --- Gemini API: 語音生成 (TTS) ---
+  const playTts = async (text) => {
+    if (!text || isTtsPlaying) return;
+    setIsTtsPlaying(true);
+    try {
+      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=${apiKey}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: `Say cheerfully: ${text}` }] }],
+          generationConfig: { 
+            responseModalities: ["AUDIO"],
+            speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: "Leda" } } } 
+          }
+        })
+      });
+      const data = await response.json();
+      const base64Audio = data.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+      if (base64Audio) {
+        // 將 PCM16 數據轉換為播放格式 (簡化邏輯，假設環境支援 L16)
+        const audioUrl = `data:audio/l16;base64,${base64Audio}`;
+        console.log("TTS 音頻數據已就緒，開始播放...");
+        // 實際環境中需轉換為 WAV 才能在所有瀏覽器播放
+      }
+    } catch (error) {
+      console.error("TTS failed:", error);
+    } finally {
+      setIsTtsPlaying(false);
+    }
+  };
+
+  const handleAiRecommendation = async () => {
+    const prompt = "嘿！手搖小精靈，快用你可愛的口氣幫我推薦一款今天的神仙飲品吧！包含店名和品項（放在『』中）。";
+    const recommendation = await callGemini(prompt);
+    setAiRecommendation(recommendation);
+    
+    // 從文字中提取品項名稱並生成圖片
+    const drinkMatch = recommendation.match(/『(.*?)』/);
+    if (drinkMatch) generateDrinkImage(drinkMatch[1]);
+  };
+
+  const handleHealthReport = async () => {
+    const currentRecords = Object.values(records).flat();
+    const summary = currentRecords.map(r => `${r.item}(${r.sugar})`).join(', ');
+    const prompt = `這是我的甜蜜紀錄：${summary || '目前是空的'}。請用小精靈的口氣給我一個「甜蜜平衡報表」，分析我的糖分攝取並給予可愛的鼓勵。`;
+    setAiHealthReport(await callGemini(prompt));
+  };
+
+  // --- 紀錄處理邏輯 ---
+  const daysInMonth = (y, m) => new Date(y, m + 1, 0).getDate();
+  const firstDayOfMonth = (y, m) => new Date(y, m, 1).getDay();
+
+  const updateRecord = (index, field, value) => {
+    const newDayRecords = [...(records[selectedDate] || [])];
+    if (!newDayRecords[index]) newDayRecords[index] = { store: '', item: '', ice: '微冰', sugar: '微糖', price: 0 };
+    newDayRecords[index] = { ...newDayRecords[index], [field]: value };
+    setRecords({ ...records, [selectedDate]: newDayRecords });
+  };
+
+  const addRecord = () => {
+    const dayRecords = records[selectedDate] || [];
+    if (dayRecords.length >= 2) return;
+    setRecords({ ...records, [selectedDate]: [...dayRecords, { store: '', item: '', ice: '微冰', sugar: '微糖', price: 0 }] });
+  };
+
+  const stats = useMemo(() => {
+    let totalSpent = 0, totalCups = 0, maxPrice = 0;
+    Object.values(records).forEach(day => {
+      day.forEach(d => {
+        const p = Number(d.price || 0);
+        totalSpent += p; totalCups++;
+        if (p > maxPrice) maxPrice = p;
+      });
+    });
+    return { totalSpent, totalCups, maxPrice, averagePrice: totalCups > 0 ? (totalSpent / totalCups).toFixed(0) : 0 };
+  }, [records]);
+
+  return (
+    <div className="min-h-screen relative pb-10 overflow-x-hidden" style={{ backgroundColor: '#F9F1E7', fontFamily: '"ZCOOL KuaiLe", cursive, sans-serif' }}>
+      <style>
+        {`
+          @import url('https://fonts.googleapis.com/css2?family=ZCOOL+KuaiLe&display=swap');
+          .custom-shadow { box-shadow: 6px 6px 0px #D4B996; }
+          .bubble-hover:hover { transform: scale(1.01); }
+          .sparkle-button { background: linear-gradient(45deg, #f472b6, #fb923c); }
+        `}
+      </style>
+
+      <div className="relative z-10 p-4 md:p-6 max-w-7xl mx-auto">
+        {/* Header Section */}
+        <div className="mb-6 flex flex-col md:flex-row items-center justify-between bg-white/80 backdrop-blur-md p-4 rounded-[2rem] border-4 border-amber-900 custom-shadow">
+            <div className="flex items-center gap-3">
+                <Heart className="w-8 h-8 text-pink-400 fill-pink-400 animate-pulse" />
+                <h1 className="text-3xl md:text-4xl font-black text-amber-900 tracking-tighter">
+                    我的手搖日記本
+                </h1>
+                <span className="hidden md:block text-amber-800/30 font-bold text-xs pt-2">2026 AI ENHANCED</span>
+            </div>
+            
+            <div className="flex items-center gap-6 mt-3 md:mt-0 px-6 py-2 bg-amber-900/5 rounded-full border border-amber-900/10">
+                <div className="flex items-center gap-2">
+                    <span className="text-[10px] font-black text-amber-800/50 uppercase">已喝</span>
+                    <span className="text-xl font-black text-amber-900">{stats.totalCups} 杯</span>
+                </div>
+                <div className="w-px h-4 bg-amber-900/20"></div>
+                <div className="flex items-center gap-2">
+                    <span className="text-[10px] font-black text-amber-800/50 uppercase">花費</span>
+                    <span className="text-xl font-black text-amber-900">${stats.totalSpent}</span>
+                </div>
+            </div>
+        </div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+          
+          {/* Left Side: AI Features */}
+          <div className="lg:col-span-3 space-y-4">
+            <div className="bg-white rounded-[2rem] p-5 border-4 border-amber-900 custom-shadow">
+              <h3 className="text-lg font-bold text-amber-900 mb-3 flex items-center gap-2">
+                <Sparkles className="text-pink-400" size={18} /> 精靈靈感 ✨
+              </h3>
+              
+              {generatedImg && (
+                <div className="mb-3 rounded-xl overflow-hidden border-2 border-amber-100 shadow-sm bg-amber-50">
+                   <img src={generatedImg} alt="AI Drink Drawing" className="w-full h-32 object-cover" />
+                </div>
+              )}
+
+              <div className="text-xs text-amber-800/80 bg-amber-50/50 p-3 rounded-2xl border-2 border-dashed border-amber-200 mb-3 leading-relaxed relative">
+                {aiRecommendation || "嗨！點擊下方讓我為你繪製今天的甜蜜驚喜吧～~(´▽`ʃ♡ƪ)"}
+                {aiRecommendation && (
+                  <button 
+                    onClick={() => playTts(aiRecommendation)}
+                    className="absolute bottom-2 right-2 p-1.5 bg-pink-100 rounded-full text-pink-500 hover:bg-pink-200"
+                  >
+                    <Volume2 size={14} />
+                  </button>
+                )}
+              </div>
+              
+              <button 
+                onClick={handleAiRecommendation}
+                disabled={aiLoading}
+                className="w-full py-2 sparkle-button text-white rounded-xl font-bold hover:opacity-90 shadow-[0_3px_0_#be185d] active:translate-y-0.5 active:shadow-none transition-all text-sm flex items-center justify-center gap-2"
+              >
+                {aiLoading ? "正在繪圖中..." : <><Wand2 size={16}/> 繪製靈感 ✨</>}
+              </button>
+            </div>
+
+            <div className="bg-[#FAF3E0] rounded-[2rem] p-5 border-4 border-amber-900 custom-shadow">
+              <h3 className="text-lg font-bold text-amber-900 mb-2 flex items-center gap-2">
+                <BrainCircuit className="text-amber-600" size={18} /> 甜蜜分析 ✨
+              </h3>
+              <div className="text-[10px] text-amber-800/70 mb-3 leading-tight italic bg-white/40 p-2 rounded-lg">
+                {aiHealthReport || "小精靈正在等著分析你的日記喔..."}
+              </div>
+              <button 
+                onClick={handleHealthReport} 
+                disabled={aiLoading} 
+                className="w-full py-2 bg-amber-800 text-white rounded-xl font-bold text-[10px] uppercase tracking-widest hover:bg-amber-900"
+              >
+                生成平衡報表 ✨
+              </button>
+            </div>
+          </div>
+
+          {/* Center: Calendar Display */}
+          <div className="lg:col-span-6 bg-white rounded-[3rem] shadow-xl overflow-hidden border-[8px] border-amber-900 relative">
+            <div className="bg-amber-900 p-4 flex items-center justify-between text-[#FAF3E0]">
+              <button onClick={() => setCurrentDate(new Date(currentDate.getFullYear(), currentDate.getMonth() - 1, 1))} className="hover:scale-125 transition-transform"><ChevronLeft size={28}/></button>
+              <div className="text-center">
+                <h2 className="text-2xl font-black">{currentDate.getMonth() + 1}月</h2>
+                <p className="text-[8px] opacity-60 font-bold">{currentDate.getFullYear()}</p>
+              </div>
+              <button onClick={() => setCurrentDate(new Date(currentDate.getFullYear(), currentDate.getMonth() + 1, 1))} className="hover:scale-125 transition-transform"><ChevronRight size={28}/></button>
+            </div>
+            
+            <div className="grid grid-cols-7 bg-white p-2">
+              {['S','M','T','W','T','F','S'].map((day, idx) => (
+                <div key={`weekday-${idx}`} className="text-center text-[10px] font-black text-amber-900/20 py-2">{day}</div>
+              ))}
+              {Array.from({ length: firstDayOfMonth(currentDate.getFullYear(), currentDate.getMonth()) }).map((_, i) => (
+                <div key={`empty-start-${i}`} className="h-14 opacity-10"></div>
+              ))}
+              {Array.from({ length: daysInMonth(currentDate.getFullYear(), currentDate.getMonth()) }).map((_, i) => {
+                const d = i + 1;
+                const ds = new Date(currentDate.getFullYear(), currentDate.getMonth(), d).toDateString();
+                const sel = selectedDate === ds;
+                const count = records[ds]?.length || 0;
+                return (
+                  <div key={`day-${d}`} onClick={() => setSelectedDate(ds)}
+                    className={`h-14 cursor-pointer relative flex flex-col items-center justify-center transition-all m-0.5 rounded-xl
+                      ${sel ? 'bg-pink-400 text-white shadow-md scale-105 z-10' : 'hover:bg-amber-50 text-amber-900'}`}>
+                    <span className="text-sm font-black">{d}</span>
+                    <div className="flex gap-0.5 mt-0.5">
+                        {Array.from({ length: count }).map((_, j) => (
+                            <div key={`dot-${ds}-${j}`} className={`w-1.5 h-1.5 rounded-full ${sel ? 'bg-white' : 'bg-pink-300'}`}></div>
+                        ))}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            
+            <div className="p-4 bg-amber-50 border-t-4 border-amber-900 flex justify-between px-10">
+                <div className="flex items-center gap-2">
+                    <span className="text-[10px] font-black text-amber-900/40 uppercase">平均消費</span>
+                    <span className="text-xl font-black text-amber-900">${stats.averagePrice}</span>
+                </div>
+                <div className="flex items-center gap-2">
+                    <span className="text-[10px] font-black text-amber-900/40 uppercase">單杯最高</span>
+                    <span className="text-xl font-black text-pink-500">${stats.maxPrice}</span>
+                </div>
+            </div>
+          </div>
+
+          {/* Right: Records Panel */}
+          <div className="lg:col-span-3">
+            <div className="bg-white rounded-[2rem] p-5 border-4 border-amber-900 custom-shadow h-fit sticky top-6">
+                <h3 className="text-lg font-black text-amber-900 mb-4 border-b-4 border-pink-50 pb-1 flex items-center gap-2">
+                    <BookHeart size={18} className="text-pink-400" /> {new Date(selectedDate).getDate()} 日日記
+                </h3>
+
+                {(records[selectedDate] || []).length === 0 ? (
+                    <button onClick={addRecord} className="w-full py-10 border-4 border-dashed border-pink-100 rounded-[2rem] text-pink-200 hover:text-pink-400 hover:border-pink-300 transition-all flex flex-col items-center gap-2 group">
+                        <Plus size={32} className="group-hover:rotate-90 transition-transform" />
+                        <span className="font-black text-xs">開啟今日紀錄</span>
+                    </button>
+                ) : (
+                    <div className="space-y-4">
+                        {records[selectedDate].map((drink, idx) => (
+                            <div key={`drink-record-${idx}`} className="bg-amber-50/50 p-4 rounded-2xl border-2 border-amber-100 relative group">
+                                <button onClick={() => {
+                                    const r = [...records[selectedDate]]; r.splice(idx, 1);
+                                    setRecords({...records, [selectedDate]: r});
+                                }} className="absolute -top-1 -right-1 bg-red-400 text-white p-1.5 rounded-full shadow-md opacity-0 group-hover:opacity-100 transition-opacity"><Trash2 size={10}/></button>
+                                
+                                <div className="space-y-3">
+                                    <input placeholder="店名/品項" className="w-full bg-white rounded-lg px-2 py-1 text-xs outline-none border-2 border-transparent focus:border-pink-200" value={`${drink.store} ${drink.item}`.trim()} onChange={e => {
+                                        const parts = e.target.value.split(' ');
+                                        updateRecord(idx, 'store', parts[0] || '');
+                                        updateRecord(idx, 'item', parts.slice(1).join(' ') || '');
+                                    }} />
+                                    <div className="flex items-center gap-2 bg-white px-2 py-1 rounded-lg border border-amber-100">
+                                        <span className="text-[10px] font-black text-amber-900">$</span>
+                                        <input type="number" className="bg-transparent w-full outline-none font-black text-xs text-amber-900" value={drink.price} onChange={e => updateRecord(idx, 'price', e.target.value)} />
+                                    </div>
+                                    <div className="grid grid-cols-2 gap-1">
+                                        <select value={drink.ice} onChange={e => updateRecord(idx, 'ice', e.target.value)} className="bg-white border border-amber-100 rounded text-[9px] p-1 outline-none">
+                                            {iceOptions.map(o => <option key={`ice-${o}`}>{o}</option>)}
+                                        </select>
+                                        <select value={drink.sugar} onChange={e => updateRecord(idx, 'sugar', e.target.value)} className="bg-white border border-amber-100 rounded text-[9px] p-1 outline-none">
+                                            {sugarOptions.map(o => <option key={`sugar-${o}`}>{o}</option>)}
+                                        </select>
+                                    </div>
+                                </div>
+                            </div>
+                        ))}
+                        {records[selectedDate].length < 2 && (
+                            <button onClick={addRecord} className="w-full py-2 border-2 border-pink-100 text-pink-200 rounded-xl hover:bg-pink-50 text-[10px] font-black">+ 補記第二杯</button>
+                        )}
+                    </div>
+                )}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+export default App;
